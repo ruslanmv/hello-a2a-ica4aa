@@ -1,0 +1,8 @@
+# Core: the production A2A server (FastAPI app, OpenAI shim, JSON-RPC, card, health)
+universal-a2a-agent>=0.1.2.dev0
+
+# Process runner
+uvicorn>=0.30
+
+# Optional convenience
+python-dotenv>=1.0

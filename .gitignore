@@ -1,0 +1,55 @@
+/.venv
+/backup
+# ─────────────────────────────────────────────
+# Python bytecode & caches
+# ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.cache/
+.tox/
+.nox/
+.pytype/
+.pyre/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Static type checkers / linters
+.mypy_cache/
+.ruff_cache/
+
+# ─────────────────────────────────────────────
+# Virtual environments
+# ─────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# Pyenv / local Python version pin
+.python-version
+.pdm-python
+
+# ─────────────────────────────────────────────
+# Packaging / build artifacts
+# ─────────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+wheels/
+*.egg
+
+# ─────────────────────────────────────────────
+# Environment files & secrets
+# Keep the example for docs; ignore everything else.
+# ─────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# Common secret material (avoid committing)

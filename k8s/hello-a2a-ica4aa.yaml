@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-a2a-ica4aa
+  namespace: ica4aa-builder-studio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hello-a2a-ica4aa
+  template:
+    metadata:
+      labels:
+        app: hello-a2a-ica4aa
+    spec:
+      containers:
+        - name: hello-a2a-ica4aa
+          image: your-registry/hello-a2a-ica4aa:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PUBLIC_URL
+              value: "http://hello-a2a-ica4aa.ica4aa-builder-studio.svc.cluster.local:8000"
+            - name: LLM_PROVIDER
+              value: "echo"
+            - name: AGENT_FRAMEWORK
+              value: "langgraph"
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-a2a-ica4aa
+  namespace: ica4aa-builder-studio
+spec:
+  selector:
+    app: hello-a2a-ica4aa
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP

@@ -1,0 +1,32 @@
+# Use this for “Upload Agent YAML File” in Builder Studio.
+# Update endpointBaseUrl to your cluster service URL.
+apiVersion: a2a/v1
+kind: Agent
+metadata:
+  name: hello-world-a2a
+  version: 0.1.0
+  description: A minimal A2A-compatible Hello World agent built on universal-a2a-agent.
+spec:
+  endpointBaseUrl: http://hello-a2a-ica4aa.ica4aa-builder-studio.svc.cluster.local:8000
+  health: /health
+  openapi: /openapi.json
+  actions:
+    - name: say_hello
+      description: Return a friendly greeting using the Universal A2A backend.
+      method: POST
+      path: /a2a/actions/say_hello
+      input:
+        type: object
+        properties:
+          name:
+            type: string
+            description: Name to greet
+        required: []
+        additionalProperties: false
+      output:
+        type: object
+        properties:
+          message:
+            type: string
+        required: [message]
+        additionalProperties: false
