@@ -301,10 +301,10 @@ Plus provider-specific credentials (see examples above).
 make run
 
 # Build a container image
-make container-build IMAGE=docker.io/<you>/hello-a2a-ica4aa:0.1.0
+make container-build IMAGE=docker.io/ruslanmv/hello-a2a-ica4aa:0.1.0
 
 # Run the container
-make container-run IMAGE=docker.io/<you>/hello-a2a-ica4aa:0.1.0 PORT=8000 \
+make container-run IMAGE=docker.io/ruslanmv/hello-a2a-ica4aa:0.1.0 PORT=8000 \
   ENV='PUBLIC_URL=http://<host>:8000 LLM_PROVIDER=echo AGENT_FRAMEWORK=langgraph'
 ```
 
