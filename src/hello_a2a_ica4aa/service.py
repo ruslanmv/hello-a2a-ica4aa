@@ -6,16 +6,19 @@ Hello World A2A (ICA4AA-ready) service.
 
 This module REUSES the production FastAPI app from `universal-a2a-agent`
 and EXTENDS it with:
-  - GET /a2a/manifest         (single-agent manifest; camelCase; apiVersion/kind/metadata/spec)
-  - GET /a2a/agents           (directory endpoint; camelCase)
-  - POST /a2a/actions/say_hello  (demo action that delegates to the Universal A2A backend)
-  - GET /health               (alias for /healthz)
+  - GET /a2a/manifest            (single-agent manifest; camelCase; apiVersion/kind/metadata/spec)
+  - GET /a2a/agents              (directory endpoint; camelCase)
+  - GET /.well-known/ica4aa/agents (well-known discovery)
+  - GET /api/v1/agents           (compat discovery)
+  - POST /api/v1/agents/{id}/invoke (invoke wrapper)
+  - POST /a2a/actions/say_hello  (demo action)
+  - GET /health                  (alias for /healthz)
 
 Why this design?
 - You keep the stable, well-tested Universal A2A HTTP surface
   (/a2a, /rpc, /openai/v1/chat/completions, /.well-known/agent-card.json, /healthz, /readyz).
-- You add the two ICA4AA discovery routes so platforms like Builder Studio can
-  “Upload YAML”, “Get Agents from A2A Server”, or “Agent Endpoint URL” and auto-discover your agent.
+- You add the ICA4AA discovery routes so Builder Studio can “Upload YAML”, “Get Agents from A2A Server”,
+  or “Agent Endpoint URL” and auto-discover your agent.
 - The demo action simply calls the local /a2a pipeline, so you can switch model providers
   and orchestration frameworks via environment variables (LLM_PROVIDER, AGENT_FRAMEWORK)
   without changing this code.
@@ -26,6 +29,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -36,6 +40,14 @@ from a2a_universal.client import A2AClient
 
 # Re-export as our FastAPI app
 app = _universal_app
+
+# Enable permissive CORS for discovery/manifest endpoints
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 
 # --------------------------------------------------------------------------------------
@@ -99,20 +111,16 @@ def health_alias() -> Dict[str, str]:
 # --------------------------------------------------------------------------------------
 @app.get("/a2a/manifest", tags=["ica4aa"], summary="Agent Manifest")
 def get_manifest(request: Request) -> Dict[str, Any]:
-    """
-    Single-agent manifest so Builder Studio (and other A2A platforms) can
-    discover from the base URL. Matches Kubernetes-style shape with camelCase keys.
-    """
     base = _public_base_url(request)
-    name = os.getenv("HELLO_AGENT_NAME", "hello-world-a2a")
-    version = os.getenv("HELLO_AGENT_VERSION", "0.1.0")
+    agent_id = os.getenv("HELLO_AGENT_ID", "hello-world")
+    name = os.getenv("HELLO_AGENT_NAME", "Hello World")
+    version = os.getenv("HELLO_AGENT_VERSION", "1.2.0")
 
+    # IO schemas
     say_hello_input = {
         "type": "object",
-        "properties": {
-            "name": {"type": "string", "description": "Name to greet"}
-        },
-        "required": [],
+        "properties": {"name": {"type": "string", "description": "Name to greet"}},
+        "required": ["name"],
         "additionalProperties": False,
     }
     say_hello_output = {
@@ -126,14 +134,23 @@ def get_manifest(request: Request) -> Dict[str, Any]:
         "apiVersion": "a2a/v1",
         "kind": "Agent",
         "metadata": {
+            "id": agent_id,
             "name": name,
             "version": version,
-            "description": "A minimal A2A-compatible Hello World agent built on universal-a2a-agent.",
+            "description": "Universal A2A Hello",
         },
         "spec": {
+            # New fields ICA4AA expects
+            "endpoints": {
+                "invoke": f"{base}/api/v1/agents/{agent_id}/invoke",
+                "health": f"{base}/healthz",
+            },
+            "auth": {"type": "none"},
+            "inputSchema": say_hello_input,   # camelCase for manifest
+            "outputSchema": say_hello_output,
+
+            # Back-compat fields retained
             "endpointBaseUrl": base,
-            # You have both /health and /healthz — keep one stable in the manifest
-            "health": "/health",
             "openapi": "/openapi.json",
             "actions": [
                 {
@@ -155,19 +172,41 @@ def get_manifest(request: Request) -> Dict[str, Any]:
 # --------------------------------------------------------------------------------------
 @app.get("/a2a/agents", tags=["ica4aa"], summary="Agents Directory")
 def list_agents(request: Request) -> Dict[str, Any]:
-    """
-    Directory endpoint so Builder Studio can 'Get Agents from A2A Server'.
-    """
     base = _public_base_url(request)
-    name = os.getenv("HELLO_AGENT_NAME", "hello-world-a2a")
-    version = os.getenv("HELLO_AGENT_VERSION", "0.1.0")
+    agent_id = os.getenv("HELLO_AGENT_ID", "hello-world")
+    name = os.getenv("HELLO_AGENT_NAME", "Hello World")
+    version = os.getenv("HELLO_AGENT_VERSION", "1.2.0")
+
+    say_hello_input = {
+        "type": "object",
+        "properties": {"name": {"type": "string", "description": "Name to greet"}},
+        "required": ["name"],
+        "additionalProperties": False,
+    }
+    say_hello_output = {
+        "type": "object",
+        "properties": {"message": {"type": "string"}},
+        "required": ["message"],
+        "additionalProperties": False,
+    }
 
     return {
         "agents": [
             {
-                "id": name,  # helpful stable identifier
+                "id": agent_id,
                 "name": name,
                 "version": version,
+                # New recommended fields
+                "description": "Universal A2A Hello",
+                "tags": ["demo", "tutorial"],
+                "endpoints": {
+                    "invoke": f"{base}/api/v1/agents/{agent_id}/invoke",
+                    "health": f"{base}/healthz",
+                },
+                "auth": {"type": "none"},
+                "input_schema": say_hello_input,   # snake_case for directory
+                "output_schema": say_hello_output,
+                # Back-compat hints
                 "manifestUrl": f"{base}/a2a/manifest",
                 "endpointBaseUrl": base,
             }
@@ -196,4 +235,71 @@ async def say_hello(payload: SayHelloIn, request: Request) -> SayHelloOut:
         # Offline / error fallback still returns a friendly message
         reply = f"Hello, {name}!"
 
+    return SayHelloOut(message=reply)
+
+
+# --------------------------------------------------------------------------------------
+# ICA4AA: Well-known discovery endpoints
+# --------------------------------------------------------------------------------------
+@app.get("/.well-known/ica4aa/agents", tags=["ica4aa"], summary="Agents Directory (well-known)")
+@app.get("/api/v1/agents", tags=["ica4aa"], summary="Agents Directory (compat)")
+def well_known_agents(request: Request) -> Dict[str, Any]:
+    base = _public_base_url(request)
+    agent_id = os.getenv("HELLO_AGENT_ID", "hello-world")
+    name = os.getenv("HELLO_AGENT_NAME", "Hello World")
+    version = os.getenv("HELLO_AGENT_VERSION", "1.2.0")
+
+    say_hello_input = {
+        "type": "object",
+        "properties": {"name": {"type": "string", "description": "Name to greet"}},
+        "required": ["name"],
+        "additionalProperties": False,
+    }
+    say_hello_output = {
+        "type": "object",
+        "properties": {"message": {"type": "string"}},
+        "required": ["message"],
+        "additionalProperties": False,
+    }
+
+    return {
+        "version": "1.0",
+        "agents": [
+            {
+                "id": agent_id,
+                "name": name,
+                "version": version,
+                "description": "Universal A2A Hello",
+                "tags": ["demo", "tutorial"],
+                "endpoints": {
+                    "invoke": f"{base}/api/v1/agents/{agent_id}/invoke",
+                    "health": f"{base}/healthz",
+                },
+                "auth": {"type": "none"},
+                "input_schema": say_hello_input,
+                "output_schema": say_hello_output,
+            }
+        ],
+    }
+
+
+# --------------------------------------------------------------------------------------
+# ICA4AA: Invoke wrapper for simple agents
+# --------------------------------------------------------------------------------------
+@app.post(
+    "/api/v1/agents/{agent_id}/invoke",
+    response_model=SayHelloOut,
+    tags=["ica4aa"],
+    summary="Invoke Agent",
+)
+async def invoke_agent(agent_id: str, payload: SayHelloIn, request: Request) -> SayHelloOut:
+    # Reuse the same logic as say_hello
+    name = (payload.name or "World").strip() or "World"
+    prompt = f"Say hello to {name}."
+    backend_base = _backend_base_url(request)
+    client = A2AClient(base_url=backend_base)
+    try:
+        reply = await run_in_threadpool(client.send, prompt, False)
+    except Exception:
+        reply = f"Hello, {name}!"
     return SayHelloOut(message=reply)

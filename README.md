@@ -19,25 +19,12 @@ Most “hello world” agents are either coupled to a specific LLM vendor, or de
 
 ---
 
-## What you get out of the box
+## What’s newly added (for ICA4AA imports)
 
-**ICA4AA / discovery endpoints**
-
-* `GET /a2a/manifest` – machine-readable **single agent** manifest
-* `GET /a2a/agents` – **directory** listing (here: just this agent)
-* `POST /a2a/actions/say_hello` – demo action (delegates to Universal A2A runtime)
-
-**Universal A2A surface** (from `universal-a2a-agent`)
-
-* `POST /a2a` – raw A2A envelope (e.g., `"method": "message/send"`)
-* `POST /rpc` – JSON-RPC 2.0 wrapper
-* `POST /openai/v1/chat/completions` – OpenAI-compatible
-* `GET /healthz`, `GET /readyz`, `GET /.well-known/agent-card.json`
-
-**Pluggable runtime**
-
-* Select a provider at runtime: `LLM_PROVIDER=echo|watsonx|openai|ollama|anthropic|gemini|azure_openai|bedrock`
-* Select orchestration style: `AGENT_FRAMEWORK=langgraph|langchain|crewai|native`
+* `/.well-known/ica4aa/agents` and `/api/v1/agents` discovery endpoints (same payload).
+* `/api/v1/agents/{agent_id}/invoke` wrapper for a clean invoke URL.
+* Enriched `/a2a/manifest` and `/a2a/agents` to include `endpoints`, `auth`, and input/output schemas.
+* CORS enabled (allow-all) so browser-based discovery works behind HTTPS frontends.
 
 ---
 
@@ -137,88 +124,174 @@ docker run --rm -p 8000:8000 \
 
 > **Tip (prod-ish):** Put your container behind a TLS proxy (Nginx, Traefik, ALB/ELB, Code Engine HTTPS). Then set `PUBLIC_URL=https://your-domain` so manifests/links are correct.
 
-### IBM Code Engine (optional)
+---
 
-A minimal path:
+## 3) AWS EC2 example — using your public IP
 
-1. Push your image:
+Assume your EC2 instance exposes the app at **[http://13.48.133.166:8080/](http://13.48.133.166:8080/)**.
 
-   ```bash
-   docker push docker.io/ruslanmv/hello-a2a-ica4aa:0.1.0
-   ```
-
-2. Create/update a Code Engine app (conceptual snippet):
-
-   ```bash
-   ibmcloud ce app create --name hello-a2a-ica4aa \
-     --image docker.io/ruslanmv/hello-a2a-ica4aa:0.1.0 \
-     --port 8000 \
-     --env PUBLIC_URL=https://hello-a2a-ica4aa.<region>.codeengine.appdomain.cloud \
-     --env LLM_PROVIDER=echo \
-     --env AGENT_FRAMEWORK=langgraph \
-     --min 1 --max 2
-   ```
-
-> Code Engine gives you an HTTPS URL out-of-the-box—use that as your `PUBLIC_URL` for clean imports.
-
-### AWS EC2 (optional)
-Once you are connected to your EC2 instance via SSH, you can pull and run the container with a single command. First, find your server's public IP address by running the command `curl -s ifconfig.me`. Then, use that IP to run the container by executing the command below, making sure to replace `<ec2-public-ip>` with the actual IP address you just found.
+Run the container mapping EC2 port 8080 → app port 8000 and set `PUBLIC_URL` accordingly:
 
 ```bash
-sudo docker run -d -p 80:8000 \
- -e PUBLIC_URL=http://<ec2-public-ip> \
- -e LLM_PROVIDER=echo \
- -e AGENT_FRAMEWORK=langgraph \
- docker.io/ruslanmv/hello-a2a-ica4aa:0.1.0
+sudo docker run -d --name hello-a2a-ica4aa \
+  -p 8080:8000 \
+  -e PUBLIC_URL=http://13.48.133.166:8080 \
+  -e LLM_PROVIDER=echo \
+  -e AGENT_FRAMEWORK=langgraph \
+  docker.io/ruslanmv/hello-a2a-ica4aa:0.1.0
 ```
 
-This command automatically downloads the image from Docker Hub, starts it in the background (`-d`), and maps the server's public port **80** to the container's application port **8000**, making your new agent accessible to the internet.
-
-```bash
-sudo docker run -d -p 8080:8000 \
- -e PUBLIC_URL=http://13.48.133.166 \
- -e LLM_PROVIDER=echo \
- -e AGENT_FRAMEWORK=langgraph \
- docker.io/ruslanmv/hello-a2a-ica4aa:0.1.0
-```
 ![](assets/2025-10-03-18-53-09.png)
+
 Open Security Group for inbound TCP 8080 (or 8000 if you mapped that directly).
 
 ![](assets/2025-10-03-19-40-44.png)
 
-# is it running?
+### Is it running?
+
+```bash
 sudo docker ps -a --filter name=hello-a2a-ica4aa
 sudo docker logs -f hello-a2a-ica4aa   # tail logs
+```
+
+**Health check**
+
+```bash
+curl -s http://13.48.133.166:8080/healthz | jq .
+```
+
+**Docs / OpenAPI**
+
+Visit: [http://13.48.133.166:8080/docs](http://13.48.133.166:8080/docs)
+
+**Discovery (optional checks)**
+
+```bash
+curl -s http://13.48.133.166:8080/.well-known/ica4aa/agents | jq .
+curl -s http://13.48.133.166:8080/api/v1/agents | jq .
+```
+
+**Invoke test**
+
+```bash
+curl -s -X POST http://13.48.133.166:8080/api/v1/agents/hello-world/invoke \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Ada"}' | jq .
+```
+
+### Updated `agent.yaml` for EC2 public IP
+
+Use this for **Upload Agent YAML File** in Builder Studio. It references the EC2 public IP/port directly so ICA4AA can invoke and health-check your agent.
+
+```yaml
+# agent.yaml
+# Use this for “Upload Agent YAML File” in Builder Studio.
+# Replace YOUR-HOST with the externally reachable HTTPS host.
+apiVersion: a2a/v1
+kind: Agent
+metadata:
+  id: hello-world
+  name: Hello World
+  version: "1.2.0"
+  description: Universal A2A Hello
+spec:
+  endpoints:
+    invoke: http://13.48.133.166:8080/api/v1/agents/hello-world/invoke
+    health: http://13.48.133.166:8080/healthz
+  auth:
+    type: none
+  inputSchema:
+    type: object
+    required: [name]
+    properties:
+      name:
+        type: string
+        description: Name to greet
+  outputSchema:
+    type: object
+    required: [message]
+    properties:
+      message:
+        type: string
+```
+
+> If you terminate TLS in front of the instance (ALB/ELB, Nginx, Traefik, Caddy, etc.), swap the URLs to **https://** and set `PUBLIC_URL=https://your-domain`.
+
 ---
 
-## 3) Import into Builder Studio (ICA4AA)
+## 4) Import into Builder Studio (ICA4AA) — Detailed Step-by-Step
 
-Once your service is reachable (localhost for a local test or a public URL for remote), you can import it in **three ways**:
+Below is an explicit walkthrough to import the EC2-hosted A2A agent (running at `http://13.48.133.166:8080`) into **ICA4AA**.
 
-1. **Upload Agent YAML File**
-   Use `agent.yaml` (update `spec.endpointBaseUrl` to your service URL).
+### A) Create (or open) your app
 
-2. **Get Agents from A2A Server**
-   Use your base + `/a2a/agents`, for example:
+**Getting started with Creating an Agentic App**
+Begin your journey by selecting **Create New Agentic App**. Fill in the required fields including **name**, **description**, and **category** to help organize your application within the platform.
 
-   ```
-   http://<your-host-or-domain>:8000/a2a/agents
-   ```
+Once your app is created, it will appear in the **dashboard** view and from there, you can further edit it (defining MCP servers, agents, workflows).
 
-3. **Agent Endpoint URL**
-   Paste just the base:
+*Tip:* Use categories to group apps by use case (e.g. Marketing, Finance) and track drafts vs. live deployments.
 
-   ```
-   http://<your-host-or-domain>:8000
-   ```
+Alternatively, you can view your existing applications previously created and you can edit each, clicking the individual app **Edit** button which will navigate you to the same dashboard view as above.
 
-   The UI will discover `/a2a/manifest`.
+### B) Open the Agents section
 
-You’ll see one action: **say_hello**. Try payload `{ "name": "World" }`.
+From your app’s **Application Overview Dashboard**, find the **Agents** card and click **Edit** (or **Add Agent**).
+
+
+### C) Choose how to onboard the agent
+
+In **Agent Orchestration Setup Guide**, you can onboard agents via:
+
+* **Upload Agent YAML File**
+* **Get Agents from A2A Server**
+* **Agent Endpoint URL** (a base URL; the platform will auto-discover)
+
+You’ll also see options like **Create Multi Agent Orchestration** (when composing multiple agents). For this Hello World example, a single agent import is fine.
+
+#### Option 1 — Upload Agent YAML File (recommended for EC2 IP)
+
+1. Click **Upload Agent YAML File**.
+2. Paste/upload the **EC2 agent.yaml** shown above (with your **actual** IP/port already filled):
+
+   * `invoke: http://13.48.133.166:8080/api/v1/agents/hello-world/invoke`
+   * `health:  http://13.48.133.166:8080/healthz`
+3. Click **Next** → review → **Import**.
+
+#### Option 2 — Get Agents from A2A Server (directory endpoint)
+
+1. Click **Get Agents from A2A Server**.
+2. **Agent Endpoint URL** → provide one of these discovery URLs:
+
+   * `http://13.48.133.166:8080/.well-known/ica4aa/agents`
+   * `http://13.48.133.166:8080/api/v1/agents`
+3. Click **Next**. You should see the **Hello World** agent listed; select it → **Import**.
+
+#### Option 3 — Agent Endpoint URL (base URL; manifest auto-discovery)
+
+1. Click **Agent Endpoint URL**.
+2. **Enter agent endpoint URL** → `http://13.48.133.166:8080`
+
+   * The importer will probe `/.well-known/ica4aa/agents` and `/a2a/manifest` automatically.
+3. Click **Next** → review → **Import**.
+
+> **What should the Endpoint URL contain?**
+>
+> * For **Upload YAML**: you don’t need an Endpoint URL; you need a correct YAML (see above).
+> * For **Get Agents from A2A Server**: use the **directory** endpoint (recommended):
+>   `http://13.48.133.166:8080/.well-known/ica4aa/agents` (or `/api/v1/agents`).
+> * For **Agent Endpoint URL**: use the **base** URL:
+>   `http://13.48.133.166:8080`.
+
+### D) Verify the imported agent
+
+After import, the **Agents** section should show your agent with a proper **name** (Hello World) and **Version** (1.2.0). If you previously had rows titled **Unknown A2A Agent** with **Failed**, they should no longer appear for this agent.
+
+You can now bind this agent into **workflows**, test **tools** (if any), and wire it to UI or other agents.
 
 ---
 
-## 4) Optional: Kubernetes (if you have a cluster)
+## 5) Optional: Kubernetes (if you have a cluster)
 
 If your ICA4AA stack runs in Kubernetes, apply the sample manifest:
 
@@ -234,7 +307,7 @@ http://hello-a2a-ica4aa.ica4aa-builder-studio.svc.cluster.local:8000
 
 ---
 
-## 5) Switching providers & frameworks
+## 6) Switching providers & frameworks
 
 Because this reuses Universal A2A under the hood, you don’t touch code—just change environment variables.
 
@@ -274,7 +347,7 @@ Restart the container/process; **your HTTP API and ICA4AA routes remain the same
 
 ---
 
-## 6) Configuration (env vars you’ll care about)
+## 7) Configuration (env vars you’ll care about)
 
 * **PUBLIC_URL** – the public base URL of this service (used in manifests/links).
 * **LLM_PROVIDER** – `echo` (no external calls), `watsonx`, `openai`, `ollama`, `anthropic`, `gemini`, `azure_openai`, `bedrock`.
@@ -285,12 +358,14 @@ Plus provider-specific credentials (see examples above).
 
 ---
 
-## 7) API surface (what’s exposed)
+## 8) API surface (what’s exposed)
 
 **Discovery & health**
 
 * `GET /a2a/manifest` – single-agent manifest (for “Agent Endpoint URL” imports)
 * `GET /a2a/agents` – directory listing (for “Get Agents from A2A Server” imports)
+* `GET /.well-known/ica4aa/agents` – well-known directory (recommended for discovery)
+* `GET /api/v1/agents` – compatibility directory
 * `GET /healthz` – liveness
 * `GET /readyz` – readiness (provider/framework reasons included)
 * `GET /.well-known/agent-card.json` – A2A Agent Card (standard discovery doc)
@@ -304,11 +379,12 @@ Plus provider-specific credentials (see examples above).
 **Demo action (ICA4AA style)**
 
 * `POST /a2a/actions/say_hello` – accepts `{ "name": "…" }`, replies with `{ "message": "…" }`
-  Implementation note: it **delegates** to the Universal A2A `/a2a` route under the hood, so it uses whatever provider/framework you configured.
+
+Implementation note: it **delegates** to the Universal A2A `/a2a` route under the hood, so it uses whatever provider/framework you configured.
 
 ---
 
-## 8) Makefile cheat sheet
+## 9) Makefile cheat sheet
 
 ```bash
 # Run locally (loads venv if present)
@@ -326,26 +402,27 @@ make container-run IMAGE=docker.io/ruslanmv/hello-a2a-ica4aa:0.1.0 PORT=8000 \
 
 ---
 
-## 9) Troubleshooting
+## 10) Troubleshooting
 
-* **`/readyz` is “not-ready”**
-  Your provider credentials may be missing or invalid. Check the env vars for your chosen `LLM_PROVIDER`.
-  Try `LLM_PROVIDER=echo` first to validate the rest of the stack.
+* **Mixed content blocked (HTTPS UI → HTTP agent)**
+  Expose the agent behind HTTPS or ensure the platform performs **server-side** fetches. Best: put a TLS proxy in front and set `PUBLIC_URL=https://…`.
 
-* **Manifest shows the wrong host**
-  Set `PUBLIC_URL` to the externally reachable base (e.g., `https://agent.example.com`).
+* **Wrong host in manifest**
+  Set `PUBLIC_URL` to the externally reachable base (e.g., `http://13.48.133.166:8080` on EC2, or your HTTPS domain).
 
-* **Firewall / SG blocks**
-  On EC2/VMs, open inbound TCP to the port you mapped (`80` or `8000`).
+* **Security groups / firewall**
+  Open the port you mapped (8080 in the example).
 
-* **Code Engine 404/timeout**
-  Ensure your app listens on `0.0.0.0:8000` (default) and Code Engine “port” is set to `8000`.
+* **Endpoint URL confusion**
 
----
+  * **Upload YAML**: no endpoint URL; use the YAML with full URLs.
+  * **Get Agents from A2A Server**: `http://13.48.133.166:8080/.well-known/ica4aa/agents` (or `/api/v1/agents`).
+  * **Agent Endpoint URL**: `http://13.48.133.166:8080` (base).
 
-## 10) How it fits in your architecture (short story)
+* **Still seeing “Unknown A2A Agent”**
 
-Your UI (or another agent) talks to this **one** HTTP service. The service then **chooses** which model to call and how to orchestrate the conversation. As your needs evolve—swap Watsonx for OpenAI, migrate LangChain → LangGraph, introduce tools—your clients don’t change. ICA4AA can discover and import the agent with no glue code via the three flows it supports.
-
-**One API on the outside. All the freedom you want on the inside.**
-
+  * Confirm the service is up: `curl -s http://13.48.133.166:8080/healthz`.
+  * Confirm discovery returns JSON: `curl -s http://13.48.133.166:8080/.well-known/ica4aa/agents | jq .`.
+  * Check CORS/mixed-content if the platform fetches from browser context.
+  * Ensure `/api/v1/agents/hello-world/invoke` responds to POST.
+  * Verify `PUBLIC_URL` matches what ICA4AA can reach (no NAT-only addresses).

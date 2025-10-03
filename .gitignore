@@ -51,5 +51,8 @@ wheels/
 .env
 .env.*
 !.env.example
+/backup
 
+* copy.*
+* copy *.*
 # Common secret material (avoid committing)
