@@ -335,6 +335,3 @@ Your UI (or another agent) talks to this **one** HTTP service. The service then 
 
 **One API on the outside. All the freedom you want on the inside.**
 
----
-
-**Happy shipping!** If you want a Helm chart, CI workflows, or production hardening checklists next, we can add those too.
