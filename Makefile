@@ -1,9 +1,8 @@
-# ==== Hello A2A ICA4AA — Makefile ====
 SHELL := /bin/bash
 
 APP            ?= hello-a2a-ica4aa
 VERSION        ?= 0.1.0
-PORT           ?= 8000
+PORT           ?= 8080
 HOST           ?= 0.0.0.0
 
 # -------- Docker image coordinates --------
@@ -19,7 +18,7 @@ PIP            ?= $(VENV)/bin/pip
 
 .DEFAULT_GOAL := help
 .PHONY: help install run clean \
-        container-build container--build container-run container--run container-push \
+        container-build container--build container-run container--run container-push container-monitor container-stop container-logs container-rm \
         buildx-buildx buildx-push \
         codeengine-deploy codeengine-delete \
         ec2-run print
@@ -34,7 +33,11 @@ help:
 	@echo ""
 	@echo "Containers:"
 	@echo "  make container-build    Build Docker image       (IMAGE=$(IMAGE))"
-	@echo "  make container-run      Run container on port $(PORT)"
+	@echo "  make container-run      Run container in background on port $(PORT)"
+	@echo "  make container-monitor  Show stats for the running container"
+	@echo "  make container-logs     Tail logs (TAIL=N to change lines)"
+	@echo "  make container-stop     Stop the running container"
+	@echo "  make container-rm       Remove the container (if exists)"
 	@echo "  make container-push     Push image to registry"
 	@echo "  make buildx-buildx      Multi-arch buildx build (PLATFORMS=$(PLATFORMS))"
 	@echo "  make buildx-push        Multi-arch buildx build & push"
@@ -81,12 +84,29 @@ container-build:
 # alias requested
 container--build: container-build
 
+# Run in background (detached). Pre-remove any old container with the same name
 container-run:
-	docker run --rm -p $(PORT):8000 \
+	-@docker rm -f $(APP) 2>/dev/null || true
+	docker run -d --name $(APP) -p $(PORT):8000 \
 		-e PUBLIC_URL=http://localhost:$(PORT) \
 		-e LLM_PROVIDER=$${LLM_PROVIDER:-echo} \
 		-e AGENT_FRAMEWORK=$${AGENT_FRAMEWORK:-langgraph} \
+		--restart unless-stopped \
 		$(IMAGE)
+	@echo "Started $(APP) in background on http://localhost:$(PORT)"
+	@echo "View logs: make container-logs  |  Stop: make container-stop"
+
+container-monitor:
+	docker stats $(APP)
+
+container-logs:
+	@docker logs -f --tail=$${TAIL:-100} $(APP)
+
+container-stop:
+	-@docker stop $(APP) 2>/dev/null || true
+
+container-rm:
+	-@docker rm -f $(APP) 2>/dev/null || true
 
 # alias requested
 container--run: container-run
@@ -125,7 +145,7 @@ ec2-run:
 	@test -n "$(SSH_KEY)"  || (echo "SSH_KEY not set"; exit 1)
 	ssh -i $(SSH_KEY) -o StrictHostKeyChecking=no $(EC2_HOST) \
 	  "docker pull $(IMAGE) && docker rm -f $(APP) 2>/dev/null || true && \
-	   docker run -d --name $(APP) -p 80:8000 \
-	     -e PUBLIC_URL=http://$$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo localhost) \
+	   docker run -d --name $(APP) -p 8080:8000 \
+	     -e PUBLIC_URL=http://$$(curl -s http://169.254.169.24/latest/meta-data/public-ipv4 2>/dev/null || echo localhost):8080 \
 	     -e LLM_PROVIDER=echo -e AGENT_FRAMEWORK=langgraph \
-	     $(IMAGE))"
+	     $(IMAGE)"

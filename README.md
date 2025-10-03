@@ -162,19 +162,33 @@ A minimal path:
 > Code Engine gives you an HTTPS URL out-of-the-box—use that as your `PUBLIC_URL` for clean imports.
 
 ### AWS EC2 (optional)
-
-On a small EC2 instance with Docker:
+Once you are connected to your EC2 instance via SSH, you can pull and run the container with a single command. First, find your server's public IP address by running the command `curl -s ifconfig.me`. Then, use that IP to run the container by executing the command below, making sure to replace `<ec2-public-ip>` with the actual IP address you just found.
 
 ```bash
 sudo docker run -d -p 80:8000 \
-  -e PUBLIC_URL=http://<ec2-public-ip> \
-  -e LLM_PROVIDER=echo \
-  -e AGENT_FRAMEWORK=langgraph \
-  docker.io/ruslanmv/hello-a2a-ica4aa:0.1.0
+ -e PUBLIC_URL=http://<ec2-public-ip> \
+ -e LLM_PROVIDER=echo \
+ -e AGENT_FRAMEWORK=langgraph \
+ docker.io/ruslanmv/hello-a2a-ica4aa:0.1.0
 ```
 
-Open Security Group for inbound TCP 80 (or 8000 if you mapped that directly).
+This command automatically downloads the image from Docker Hub, starts it in the background (`-d`), and maps the server's public port **80** to the container's application port **8000**, making your new agent accessible to the internet.
 
+```bash
+sudo docker run -d -p 8080:8000 \
+ -e PUBLIC_URL=http://13.48.133.166 \
+ -e LLM_PROVIDER=echo \
+ -e AGENT_FRAMEWORK=langgraph \
+ docker.io/ruslanmv/hello-a2a-ica4aa:0.1.0
+```
+![](assets/2025-10-03-18-53-09.png)
+Open Security Group for inbound TCP 8080 (or 8000 if you mapped that directly).
+
+![](assets/2025-10-03-19-40-44.png)
+
+# is it running?
+sudo docker ps -a --filter name=hello-a2a-ica4aa
+sudo docker logs -f hello-a2a-ica4aa   # tail logs
 ---
 
 ## 3) Import into Builder Studio (ICA4AA)
