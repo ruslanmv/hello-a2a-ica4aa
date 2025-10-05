@@ -1,47 +1,27 @@
-# src/hello_a2a_ica4aa/service.py
 from __future__ import annotations
 
-"""
-Hello World A2A (ICA4AA-ready) service.
-
-This module REUSES the production FastAPI app from `universal-a2a-agent`
-and EXTENDS it with:
-  - GET /a2a/manifest            (single-agent manifest; camelCase; apiVersion/kind/metadata/spec)
-  - GET /a2a/agents              (directory endpoint; camelCase)
-  - GET /.well-known/ica4aa/agents (well-known discovery)
-  - GET /api/v1/agents           (compat discovery)
-  - POST /api/v1/agents/{id}/invoke (invoke wrapper)
-  - POST /a2a/actions/say_hello  (demo action)
-  - GET /health                  (alias for /healthz)
-
-Why this design?
-- You keep the stable, well-tested Universal A2A HTTP surface
-  (/a2a, /rpc, /openai/v1/chat/completions, /.well-known/agent-card.json, /healthz, /readyz).
-- You add the ICA4AA discovery routes so Builder Studio can “Upload YAML”, “Get Agents from A2A Server”,
-  or “Agent Endpoint URL” and auto-discover your agent.
-- The demo action simply calls the local /a2a pipeline, so you can switch model providers
-  and orchestration frameworks via environment variables (LLM_PROVIDER, AGENT_FRAMEWORK)
-  without changing this code.
-"""
-
 import os
-from typing import Any, Dict, Optional
+import time
+import uuid
+from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
-from starlette.concurrency import run_in_threadpool
 
-# 1) Import the production FastAPI app from universal-a2a-agent.
-#    We extend this app with ICA4AA-friendly endpoints.
-from a2a_universal.server import app as _universal_app
-from a2a_universal.client import A2AClient
+# ======================================================================================
+# App
+# ======================================================================================
 
-# Re-export as our FastAPI app
-app = _universal_app
+app = FastAPI(
+    title="Universal A2A Agent",
+    version=os.getenv("A2A_VERSION", "1.2.0"),
+    description="Universal A2A Agent - HTTP surface for agent pipelines (+ ICA4AA compatibility).",
+)
 
-# Enable permissive CORS for discovery/manifest endpoints
+# Permissive CORS so ICA4AA UI and other tools can discover your server easily
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -49,10 +29,399 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ======================================================================================
+# Helpers
+# ======================================================================================
 
-# --------------------------------------------------------------------------------------
-# Models for the custom action
-# --------------------------------------------------------------------------------------
+def _request_id(req: Request) -> str:
+    return req.headers.get("x-request-id") or str(uuid.uuid4())
+
+
+def _with_common_headers(rid: str) -> Dict[str, str]:
+    return {"x-request-id": rid, "cache-control": "no-store"}
+
+
+def _public_base_url(request: Request) -> str:
+    return (os.getenv("PUBLIC_URL") or str(request.base_url)).rstrip("/")
+
+
+def _backend_base_url(request: Request) -> str:
+    return (
+        os.getenv("A2A_BACKEND_BASE")
+        or os.getenv("PUBLIC_URL")
+        or str(request.base_url)
+    ).rstrip("/")
+
+
+def _extract_user_text_from_a2a(params: Dict[str, Any]) -> str:
+    """
+    Pull the first text part from A2A-shaped params:
+      params = {"message": {"parts": [{"text": "..."}, {"type":"text","text":"..."}]}}
+    """
+    msg = (params or {}).get("message") or {}
+    for p in (msg.get("parts") or []):
+        if not isinstance(p, dict):
+            continue
+        if isinstance(p.get("text"), str) and p.get("text"):
+            return p["text"]
+    return ""
+
+
+def _extract_context_id(params: Dict[str, Any]) -> str:
+    """Best-effort context id extraction, or create one if missing."""
+    return (
+        (params or {}).get("contextId")
+        or ((params or {}).get("message") or {}).get("contextId")
+        or f"ctx-{uuid.uuid4()}"
+    )
+
+
+def _make_a2a_text_message(text: str, context_id: str) -> Dict[str, Any]:
+    """
+    Build a compliant final *message* event for the Inspector.
+
+    The Inspector expects an event with:
+      - kind: "message"
+      - role: "agent"
+      - messageId: <string>
+      - contextId: <string>
+      - parts: [{ "text": "..." }]
+    """
+    return {
+        "kind": "message",
+        "messageId": f"msg-{uuid.uuid4()}",  # use messageId (not id)
+        "contextId": context_id,
+        "role": "agent",
+        "parts": [{"text": text}],
+    }
+
+
+def _ok() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+# ======================================================================================
+# Root + health
+# ======================================================================================
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    return RedirectResponse(url="/docs")
+
+
+@app.get("/healthz")
+async def healthz(req: Request) -> JSONResponse:
+    rid = _request_id(req)
+    return JSONResponse(_ok(), headers=_with_common_headers(rid))
+
+
+@app.get("/health", include_in_schema=False)
+async def health_alias(req: Request) -> JSONResponse:
+    rid = _request_id(req)
+    return JSONResponse(_ok(), headers=_with_common_headers(rid))
+
+
+@app.get("/readyz")
+async def readyz(req: Request) -> JSONResponse:
+    rid = _request_id(req)
+    return JSONResponse(_ok(), headers=_with_common_headers(rid))
+
+
+# ======================================================================================
+# A2A Inspector-friendly agent card (rich schema)
+# ======================================================================================
+
+@app.get("/.well-known/agent-card.json")
+@app.get("/.well-known/agent.json")
+async def well_known_agent_card(req: Request) -> JSONResponse:
+    rid = _request_id(req)
+    base = _public_base_url(req)
+    card = {
+        "protocolVersion": os.getenv("PROTOCOL_VERSION", "0.3.0"),
+        "preferredTransport": "JSONRPC",
+        "name": os.getenv("A2A_AGENT_NAME", "Universal A2A Agent"),
+        "version": os.getenv("A2A_AGENT_VERSION", "1.2.0"),
+        "description": "Universal A2A HTTP entry point.",
+        "url": f"{base}/rpc",
+        "capabilities": {"streaming": False, "pushNotifications": False},
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain"],
+        "skills": [
+            {
+                "id": "chat",
+                "name": "chat",
+                "description": "Basic chat response",
+                "tags": ["chat", "greeting"],
+            }
+        ],
+        "endpoints": {
+            "a2a": f"{base}/a2a",
+            "jsonrpc": f"{base}/rpc",
+            "openai": f"{base}/openai/v1/chat/completions",
+            "health": f"{base}/healthz",
+        },
+    }
+    return JSONResponse(card, headers=_with_common_headers(rid))
+
+
+# ======================================================================================
+# A2A: message/send (canonical, non-JSON-RPC)
+# ======================================================================================
+
+@app.post("/a2a")
+async def a2a_endpoint(req: Request) -> JSONResponse:
+    rid = _request_id(req)
+    body = await req.json()
+    method = body.get("method")
+    params = body.get("params") or {}
+
+    if method != "message/send":
+        return JSONResponse(
+            {"error": {"code": -32601, "message": f"Unsupported method: {method}"}},
+            status_code=400,
+            headers=_with_common_headers(rid),
+        )
+
+    user_text = _extract_user_text_from_a2a(params).strip()
+    if not user_text:
+        return JSONResponse(
+            {"error": {"code": -32602, "message": "No text found in message parts."}},
+            status_code=400,
+            headers=_with_common_headers(rid),
+        )
+
+    context_id = _extract_context_id(params)
+    reply = os.getenv("A2A_ECHO_PREFIX", "") + user_text
+
+    # FIXED: The result should be the message object directly.
+    result = _make_a2a_text_message(reply, context_id)
+    return JSONResponse({"result": result}, headers=_with_common_headers(rid))
+
+
+# ======================================================================================
+# JSON-RPC 2.0 mirror (what the Inspector calls)
+# ======================================================================================
+
+@app.post("/rpc")
+async def jsonrpc(req: Request) -> JSONResponse:
+    rid = _request_id(req)
+    body = await req.json()
+
+    if body.get("jsonrpc") != "2.0":
+        return JSONResponse(
+            {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"}, "id": body.get("id")},
+            status_code=400,
+            headers=_with_common_headers(rid),
+        )
+
+    method = body.get("method")
+    params = (body.get("params") or {})
+    if method != "message/send":
+        return JSONResponse(
+            {"jsonrpc": "2.0", "error": {"code": -32601, "message": f"Unsupported method: {method}"}, "id": body.get("id")},
+            status_code=400,
+            headers=_with_common_headers(rid),
+        )
+
+    user_text = _extract_user_text_from_a2a(params).strip()
+    if not user_text:
+        return JSONResponse(
+            {"jsonrpc": "2.0", "error": {"code": -32602, "message": "No text found in message parts."}, "id": body.get("id")},
+            status_code=400,
+            headers=_with_common_headers(rid),
+        )
+
+    context_id = _extract_context_id(params)
+    reply = os.getenv("A2A_ECHO_PREFIX", "You said: ") + user_text
+
+    # FIXED: The result should be the message object directly, not a container.
+    result = _make_a2a_text_message(reply, context_id)
+    return JSONResponse(
+        {"jsonrpc": "2.0", "result": result, "id": body.get("id")},
+        headers=_with_common_headers(rid)
+    )
+
+
+# ======================================================================================
+# OpenAI-compatible passthrough (minimal)
+# ======================================================================================
+
+@app.post("/openai/v1/chat/completions")
+async def openai_chat_completions(req: Request) -> JSONResponse:
+    rid = _request_id(req)
+    body = await req.json()
+    messages = body.get("messages") or []
+    user_text = ""
+    for m in reversed(messages):
+        if (m or {}).get("role") == "user":
+            user_text = (m.get("content") or "").strip()
+            if user_text:
+                break
+    if not user_text:
+        return JSONResponse(
+            {"error": {"message": "No user message found."}},
+            status_code=400,
+            headers=_with_common_headers(rid),
+        )
+
+    reply = os.getenv("A2A_ECHO_PREFIX", "") + user_text
+    now = int(time.time())
+    resp = {
+        "id": f"cmpl-{uuid.uuid4()}",
+        "object": "chat.completion",
+        "created": now,
+        "model": body.get("model", "dummy-a2a"),
+        "choices": [
+            {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": reply}}
+        ],
+        "usage": {"prompt_tokens": len(user_text.split()), "completion_tokens": len(reply.split()), "total_tokens": 0},
+    }
+    return JSONResponse(resp, headers=_with_common_headers(rid))
+
+
+# ======================================================================================
+# -----------------------  ICA4AA compatibility extensions  ---------------------------
+# ======================================================================================
+
+HELLO_AGENT_ID = os.getenv("HELLO_AGENT_ID", "hello-world")
+HELLO_AGENT_NAME = os.getenv("HELLO_AGENT_NAME", "Hello World")
+HELLO_AGENT_VERSION = os.getenv("HELLO_AGENT_VERSION", "1.2.0")
+HELLO_AGENT_DESC = os.getenv("HELLO_AGENT_DESC", "Universal A2A Hello")
+HELLO_AGENT_TAGS = [t for t in (os.getenv("HELLO_AGENT_TAGS", "demo,tutorial").split(",")) if t]
+
+SAY_HELLO_INPUT = {
+    "type": "object",
+    "properties": {"name": {"type": "string", "description": "Name to greet"}},
+    "required": ["name"],
+    "additionalProperties": False,
+}
+SAY_HELLO_OUTPUT = {
+    "type": "object",
+    "properties": {"message": {"type": "string"}},
+    "required": ["message"],
+    "additionalProperties": False,
+}
+
+
+def _invoke_via_local_a2a(base_url: str, prompt_text: str, timeout: float = 20.0) -> str:
+    """
+    Reuse our /a2a pipeline; tolerate all server shapes we might return.
+    """
+    payload = {
+        "method": "message/send",
+        "params": {"message": {"role": "user", "messageId": "ica4aa", "parts": [{"text": prompt_text}]}}
+    }
+    r = httpx.post(f"{base_url}/a2a", json=payload, timeout=timeout)
+    r.raise_for_status()
+    data = r.json()
+
+    # unwrap {"result": ...} if present
+    data = data.get("result", data)
+
+    # NOTE: The original _invoke_via_local_a2a expected a nested message.
+    # Since we fixed the /a2a endpoint, this function can be simplified.
+    # The 'result' is now the message object itself.
+    if isinstance(data, dict):
+        for p in (data.get("parts") or []):
+            if isinstance(p, dict) and isinstance(p.get("text"), str):
+                return p["text"]
+
+    return ""
+
+
+@app.get("/a2a/manifest", tags=["ica4aa"], summary="Agent Manifest")
+async def get_manifest(request: Request) -> JSONResponse:
+    rid = _request_id(request)
+    base = _public_base_url(request)
+    manifest = {
+        "apiVersion": "a2a/v1",
+        "kind": "Agent",
+        "metadata": {
+            "id": HELLO_AGENT_ID,
+            "name": HELLO_AGENT_NAME,
+            "version": HELLO_AGENT_VERSION,
+            "description": HELLO_AGENT_DESC,
+            "tags": HELLO_AGENT_TAGS,
+        },
+        "spec": {
+            "endpoints": {
+                "invoke": f"{base}/api/v1/agents/{HELLO_AGENT_ID}/invoke",
+                "health": f"{base}/healthz",
+            },
+            "auth": {"type": "none"},
+            "inputSchema": SAY_HELLO_INPUT,
+            "outputSchema": SAY_HELLO_OUTPUT,
+            "endpointBaseUrl": base,
+            "openapi": "/openapi.json",
+            "actions": [
+                {
+                    "name": "say_hello",
+                    "description": "Return a friendly greeting via the Universal A2A backend.",
+                    "method": "POST",
+                    "path": "/a2a/actions/say_hello",
+                    "input": SAY_HELLO_INPUT,
+                    "output": SAY_HELLO_OUTPUT,
+                }
+            ],
+        },
+    }
+    return JSONResponse(manifest, headers=_with_common_headers(rid))
+
+
+@app.get("/a2a/agents", tags=["ica4aa"], summary="Agents Directory")
+async def list_agents(request: Request) -> JSONResponse:
+    rid = _request_id(request)
+    base = _public_base_url(request)
+    listing = {
+        "agents": [
+            {
+                "id": HELLO_AGENT_ID,
+                "name": HELLO_AGENT_NAME,
+                "version": HELLO_AGENT_VERSION,
+                "description": HELLO_AGENT_DESC,
+                "tags": HELLO_AGENT_TAGS,
+                "endpoints": {
+                    "invoke": f"{base}/api/v1/agents/{HELLO_AGENT_ID}/invoke",
+                    "health": f"{base}/healthz",
+                },
+                "auth": {"type": "none"},
+                "input_schema": SAY_HELLO_INPUT,
+                "output_schema": SAY_HELLO_OUTPUT,
+                "manifestUrl": f"{base}/a2a/manifest",
+                "endpointBaseUrl": base,
+            }
+        ]
+    }
+    return JSONResponse(listing, headers=_with_common_headers(rid))
+
+
+@app.get("/.well-known/ica4aa/agents", tags=["ica4aa"], summary="Agents Directory (well-known)")
+@app.get("/api/v1/agents", tags=["ica4aa"], summary="Agents Directory (compat)")
+async def well_known_agents(request: Request) -> JSONResponse:
+    rid = _request_id(request)
+    base = _public_base_url(request)
+    payload = {
+        "version": "1.0",
+        "agents": [
+            {
+                "id": HELLO_AGENT_ID,
+                "name": HELLO_AGENT_NAME,
+                "version": HELLO_AGENT_VERSION,
+                "description": HELLO_AGENT_DESC,
+                "tags": HELLO_AGENT_TAGS,
+                "endpoints": {
+                    "invoke": f"{base}/api/v1/agents/{HELLO_AGENT_ID}/invoke",
+                    "health": f"{base}/healthz",
+                },
+                "auth": {"type": "none"},
+                "input_schema": SAY_HELLO_INPUT,
+                "output_schema": SAY_HELLO_OUTPUT,
+            }
+        ],
+    }
+    return JSONResponse(payload, headers=_with_common_headers(rid))
+
+
 class SayHelloIn(BaseModel):
     name: Optional[str] = None
 
@@ -61,245 +430,34 @@ class SayHelloOut(BaseModel):
     message: str
 
 
-# --------------------------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------------------------
-def _public_base_url(request: Request) -> str:
-    """
-    Compute the externally reachable base URL.
-
-    Priority:
-      1) PUBLIC_URL env var (recommended in containers/reverse proxies),
-      2) request.base_url (FastAPI/ASGI-derived, respects Host/X-Forwarded-* if configured).
-
-    Always returns without a trailing slash.
-    """
-    return (os.getenv("PUBLIC_URL") or str(request.base_url)).rstrip("/")
-
-
-def _backend_base_url(request: Request) -> str:
-    """
-    Where to call the Universal A2A backend. Defaults to this same service,
-    but can be pointed elsewhere if you run a separate A2A hub.
-
-      A2A_BACKEND_BASE  -> overrides
-      PUBLIC_URL        -> otherwise
-      request.base_url  -> last resort
-
-    Always returns without a trailing slash.
-    """
-    return (
-        os.getenv("A2A_BACKEND_BASE")
-        or os.getenv("PUBLIC_URL")
-        or str(request.base_url)
-    ).rstrip("/")
-
-
-# --------------------------------------------------------------------------------------
-# Convenience: health alias (many platforms probe /health)
-# --------------------------------------------------------------------------------------
-@app.get("/health", include_in_schema=False)
-def health_alias() -> Dict[str, str]:
-    # universal-a2a-agent already exposes /healthz; this is a friendly alias
-    return {"status": "ok"}
-
-
-# --------------------------------------------------------------------------------------
-# ICA4AA: Agent Manifest (single-agent)
-#   - IMPORTANT: Use camelCase and apiVersion/kind/metadata/spec structure.
-#   - Matches the same shape as the agent.yaml used in “Upload Agent YAML”.
-# --------------------------------------------------------------------------------------
-@app.get("/a2a/manifest", tags=["ica4aa"], summary="Agent Manifest")
-def get_manifest(request: Request) -> Dict[str, Any]:
-    base = _public_base_url(request)
-    agent_id = os.getenv("HELLO_AGENT_ID", "hello-world")
-    name = os.getenv("HELLO_AGENT_NAME", "Hello World")
-    version = os.getenv("HELLO_AGENT_VERSION", "1.2.0")
-
-    # IO schemas
-    say_hello_input = {
-        "type": "object",
-        "properties": {"name": {"type": "string", "description": "Name to greet"}},
-        "required": ["name"],
-        "additionalProperties": False,
-    }
-    say_hello_output = {
-        "type": "object",
-        "properties": {"message": {"type": "string"}},
-        "required": ["message"],
-        "additionalProperties": False,
-    }
-
-    return {
-        "apiVersion": "a2a/v1",
-        "kind": "Agent",
-        "metadata": {
-            "id": agent_id,
-            "name": name,
-            "version": version,
-            "description": "Universal A2A Hello",
-        },
-        "spec": {
-            # New fields ICA4AA expects
-            "endpoints": {
-                "invoke": f"{base}/api/v1/agents/{agent_id}/invoke",
-                "health": f"{base}/healthz",
-            },
-            "auth": {"type": "none"},
-            "inputSchema": say_hello_input,   # camelCase for manifest
-            "outputSchema": say_hello_output,
-
-            # Back-compat fields retained
-            "endpointBaseUrl": base,
-            "openapi": "/openapi.json",
-            "actions": [
-                {
-                    "name": "say_hello",
-                    "description": "Return a friendly greeting using the Universal A2A backend.",
-                    "method": "POST",
-                    "path": "/a2a/actions/say_hello",
-                    "input": say_hello_input,
-                    "output": say_hello_output,
-                }
-            ],
-        },
-    }
-
-
-# --------------------------------------------------------------------------------------
-# ICA4AA: Directory endpoint (multi-agent list — here we return just this one)
-#   - IMPORTANT: Use camelCase keys like manifestUrl and endpointBaseUrl.
-# --------------------------------------------------------------------------------------
-@app.get("/a2a/agents", tags=["ica4aa"], summary="Agents Directory")
-def list_agents(request: Request) -> Dict[str, Any]:
-    base = _public_base_url(request)
-    agent_id = os.getenv("HELLO_AGENT_ID", "hello-world")
-    name = os.getenv("HELLO_AGENT_NAME", "Hello World")
-    version = os.getenv("HELLO_AGENT_VERSION", "1.2.0")
-
-    say_hello_input = {
-        "type": "object",
-        "properties": {"name": {"type": "string", "description": "Name to greet"}},
-        "required": ["name"],
-        "additionalProperties": False,
-    }
-    say_hello_output = {
-        "type": "object",
-        "properties": {"message": {"type": "string"}},
-        "required": ["message"],
-        "additionalProperties": False,
-    }
-
-    return {
-        "agents": [
-            {
-                "id": agent_id,
-                "name": name,
-                "version": version,
-                # New recommended fields
-                "description": "Universal A2A Hello",
-                "tags": ["demo", "tutorial"],
-                "endpoints": {
-                    "invoke": f"{base}/api/v1/agents/{agent_id}/invoke",
-                    "health": f"{base}/healthz",
-                },
-                "auth": {"type": "none"},
-                "input_schema": say_hello_input,   # snake_case for directory
-                "output_schema": say_hello_output,
-                # Back-compat hints
-                "manifestUrl": f"{base}/a2a/manifest",
-                "endpointBaseUrl": base,
-            }
-        ]
-    }
-
-
-# --------------------------------------------------------------------------------------
-# ICA4AA: Action - say_hello
-#   - Delegates to the Universal A2A backend (/a2a) so you get whichever
-#     provider/framework you configured via env (LLM_PROVIDER, AGENT_FRAMEWORK, …).
-#   - Runs the blocking HTTP call in a thread to avoid blocking the event loop.
-# --------------------------------------------------------------------------------------
 @app.post("/a2a/actions/say_hello", response_model=SayHelloOut, tags=["ica4aa"], summary="Say Hello")
-async def say_hello(payload: SayHelloIn, request: Request) -> SayHelloOut:
+async def say_hello(payload: SayHelloIn, request: Request) -> JSONResponse:
+    rid = _request_id(request)
     name = (payload.name or "World").strip() or "World"
     prompt = f"Say hello to {name}."
-
-    backend_base = _backend_base_url(request)
-    client = A2AClient(base_url=backend_base)
-
     try:
-        # A2AClient.send is synchronous; run in thread to keep async server responsive
-        reply = await run_in_threadpool(client.send, prompt, False)
-    except (httpx.HTTPError, Exception):
-        # Offline / error fallback still returns a friendly message
-        reply = f"Hello, {name}!"
-
-    return SayHelloOut(message=reply)
-
-
-# --------------------------------------------------------------------------------------
-# ICA4AA: Well-known discovery endpoints
-# --------------------------------------------------------------------------------------
-@app.get("/.well-known/ica4aa/agents", tags=["ica4aa"], summary="Agents Directory (well-known)")
-@app.get("/api/v1/agents", tags=["ica4aa"], summary="Agents Directory (compat)")
-def well_known_agents(request: Request) -> Dict[str, Any]:
-    base = _public_base_url(request)
-    agent_id = os.getenv("HELLO_AGENT_ID", "hello-world")
-    name = os.getenv("HELLO_AGENT_NAME", "Hello World")
-    version = os.getenv("HELLO_AGENT_VERSION", "1.2.0")
-
-    say_hello_input = {
-        "type": "object",
-        "properties": {"name": {"type": "string", "description": "Name to greet"}},
-        "required": ["name"],
-        "additionalProperties": False,
-    }
-    say_hello_output = {
-        "type": "object",
-        "properties": {"message": {"type": "string"}},
-        "required": ["message"],
-        "additionalProperties": False,
-    }
-
-    return {
-        "version": "1.0",
-        "agents": [
-            {
-                "id": agent_id,
-                "name": name,
-                "version": version,
-                "description": "Universal A2A Hello",
-                "tags": ["demo", "tutorial"],
-                "endpoints": {
-                    "invoke": f"{base}/api/v1/agents/{agent_id}/invoke",
-                    "health": f"{base}/healthz",
-                },
-                "auth": {"type": "none"},
-                "input_schema": say_hello_input,
-                "output_schema": say_hello_output,
-            }
-        ],
-    }
-
-
-# --------------------------------------------------------------------------------------
-# ICA4AA: Invoke wrapper for simple agents
-# --------------------------------------------------------------------------------------
-@app.post(
-    "/api/v1/agents/{agent_id}/invoke",
-    response_model=SayHelloOut,
-    tags=["ica4aa"],
-    summary="Invoke Agent",
-)
-async def invoke_agent(agent_id: str, payload: SayHelloIn, request: Request) -> SayHelloOut:
-    # Reuse the same logic as say_hello
-    name = (payload.name or "World").strip() or "World"
-    prompt = f"Say hello to {name}."
-    backend_base = _backend_base_url(request)
-    client = A2AClient(base_url=backend_base)
-    try:
-        reply = await run_in_threadpool(client.send, prompt, False)
+        reply = _invoke_via_local_a2a(_backend_base_url(request), prompt)
     except Exception:
         reply = f"Hello, {name}!"
-    return SayHelloOut(message=reply)
+    return JSONResponse(SayHelloOut(message=reply).model_dump(), headers=_with_common_headers(rid))
+
+
+@app.post("/api/v1/agents/{agent_id}/invoke", response_model=SayHelloOut, tags=["ica4aa"], summary="Invoke Agent")
+async def invoke_agent(agent_id: str, payload: SayHelloIn, request: Request) -> JSONResponse:
+    rid = _request_id(request)
+    name = (payload.name or "World").strip() or "World"
+    prompt = f"Say hello to {name}."
+    try:
+        reply = _invoke_via_local_a2a(_backend_base_url(request), prompt)
+    except Exception:
+        reply = f"Hello, {name}!"
+    return JSONResponse(SayHelloOut(message=reply).model_dump(), headers=_with_common_headers(rid))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "__main__:app", # Changed for direct execution
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8080")),
+        reload=True,
+    )

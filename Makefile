@@ -17,7 +17,7 @@ UVICORN        ?= $(VENV)/bin/uvicorn
 PIP            ?= $(VENV)/bin/pip
 
 .DEFAULT_GOAL := help
-.PHONY: help install run clean \
+.PHONY: help install run stop clean \
         container-build container--build container-run container--run container-push container-monitor container-stop container-logs container-rm \
         buildx-buildx buildx-push \
         codeengine-deploy codeengine-delete \
@@ -30,6 +30,7 @@ help:
 	@echo "Local:"
 	@echo "  make install            Create venv and install requirements.txt"
 	@echo "  make run                Run uvicorn locally (uses src/ as app dir)"
+	@echo "  make stop               Stop the locally running uvicorn server"
 	@echo ""
 	@echo "Containers:"
 	@echo "  make container-build    Build Docker image       (IMAGE=$(IMAGE))"
@@ -66,6 +67,12 @@ run: install
 	LLM_PROVIDER=$${LLM_PROVIDER:-echo} \
 	AGENT_FRAMEWORK=$${AGENT_FRAMEWORK:-langgraph} \
 	$(UVICORN) --app-dir src hello_a2a_ica4aa.service:app --host $(HOST) --port $(PORT)
+
+# New target to stop the local server
+stop:
+	@echo "Attempting to stop application on port $(PORT)..."
+	-@kill $$(lsof -t -i:$(PORT)) 2>/dev/null || true
+	@echo "Stop command executed. Any process on port $(PORT) should be terminated."
 
 clean:
 	rm -rf $(VENV) .pytest_cache __pycache__ .mypy_cache
@@ -144,8 +151,8 @@ ec2-run:
 	@test -n "$(EC2_HOST)" || (echo "EC2_HOST not set"; exit 1)
 	@test -n "$(SSH_KEY)"  || (echo "SSH_KEY not set"; exit 1)
 	ssh -i $(SSH_KEY) -o StrictHostKeyChecking=no $(EC2_HOST) \
-	  "docker pull $(IMAGE) && docker rm -f $(APP) 2>/dev/null || true && \
-	   docker run -d --name $(APP) -p 8080:8000 \
-	     -e PUBLIC_URL=http://$$(curl -s http://169.254.169.24/latest/meta-data/public-ipv4 2>/dev/null || echo localhost):8080 \
-	     -e LLM_PROVIDER=echo -e AGENT_FRAMEWORK=langgraph \
-	     $(IMAGE)"
+		"docker pull $(IMAGE) && docker rm -f $(APP) 2>/dev/null || true && \
+		   docker run -d --name $(APP) -p 8080:8000 \
+			-e PUBLIC_URL=http://$$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo localhost):8080 \
+			-e LLM_PROVIDER=echo -e AGENT_FRAMEWORK=langgraph \
+			$(IMAGE)"
